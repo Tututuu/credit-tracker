@@ -1207,6 +1207,26 @@
       };
     },
 
+    getDebugText() {
+      return JSON.stringify(Diagnostics.getSanitizedState(), null, 2);
+    },
+
+    debug() {
+      const text = Diagnostics.getDebugText();
+      console.log(text);
+
+      const clipboard = Runtime.pageWindow().navigator?.clipboard || navigator.clipboard;
+      if (clipboard?.writeText) {
+        clipboard.writeText(text)
+          .then(() => console.info('AmexCreditTracker debug output copied to clipboard.'))
+          .catch(() => console.info('AmexCreditTracker debug output printed above. Copy it from the console.'));
+      } else {
+        console.info('AmexCreditTracker debug output printed above. Copy it from the console.');
+      }
+
+      return text;
+    },
+
     sanitizeAccount(account) {
       return {
         ...account,
@@ -1576,6 +1596,7 @@
   const PublicApi = {
     refresh: () => (state ? Dashboard.refreshAll() : Promise.resolve()),
     getState: () => (state ? Diagnostics.getSanitizedState() : { status: 'Initializing' }),
+    debug: () => (state ? Diagnostics.debug() : JSON.stringify({ status: 'Initializing' }, null, 2)),
     clearCache: () => {
       if (state) Diagnostics.clearCache();
     },
