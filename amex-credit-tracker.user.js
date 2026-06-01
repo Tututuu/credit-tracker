@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amex Personal Credit Tracker
 // @namespace    local.amex-credit-tracker
-// @version      0.2.0
+// @version      0.2.1
 // @description  Personal Amex benefit credit tracker dashboard.
 // @match        https://global.americanexpress.com/*
 // @match        https://*.americanexpress.com/*
@@ -52,7 +52,6 @@
     trackers: 'act.trackers.v1',
     lastUpdated: 'act.lastUpdated.v1',
     keywords: 'act.keywords.v1',
-    showAll: 'act.showAll.v1',
     hideAchieved: 'act.hideAchieved.v1',
   };
 
@@ -71,14 +70,12 @@
       trackers,
       lastUpdated,
       keywords,
-      showAll,
       hideAchieved,
     ] = await Promise.all([
       Storage.read(STORAGE_KEYS.accounts, []),
       Storage.read(STORAGE_KEYS.trackers, []),
       Storage.read(STORAGE_KEYS.lastUpdated, null),
       Storage.read(STORAGE_KEYS.keywords, DEFAULT_TRACKED_BENEFIT_KEYWORDS),
-      Storage.read(STORAGE_KEYS.showAll, false),
       Storage.read(STORAGE_KEYS.hideAchieved, false),
     ]);
 
@@ -87,7 +84,6 @@
       trackers: Collection.asArray(trackers),
       lastUpdated,
       keywords: Text.normalizeStoredKeywords(keywords),
-      showAll,
       hideAchieved,
       status: 'Waiting for Amex account data',
       error: '',
@@ -741,12 +737,12 @@
       try {
         const batchData = await TrackerApi.postTrackerPayload(payload);
         const batchRows = DataExtractor.extractTrackers(batchData, payload.length === 1 ? payload[0].accountToken : null);
-        const batchHasAccountMapping = batchRows.length > 0 && batchRows.every((row) => row.accountToken);
+        const batchHasAccountMapping = TrackerRefresh.batchCoversRequestedAccounts(payload, batchRows);
 
         if (payload.length === 1 || batchHasAccountMapping) {
           TrackerRepository.replaceTrackersForAccounts(payload.map((item) => item.accountToken), batchRows);
         } else {
-          throw new Error('Batch response did not include account mapping');
+          throw new Error('Batch response did not include complete account mapping');
         }
       } catch (_batchError) {
         await TrackerRefresh.refreshSequentially();
@@ -757,6 +753,17 @@
         TrackerRepository.persist();
         Dashboard.render();
       }
+    },
+
+    batchCoversRequestedAccounts(payload, rows) {
+      const requestedTokens = new Set(payload.map((item) => item.accountToken).filter(Boolean));
+      if (requestedTokens.size <= 1) return true;
+      if (rows.length === 0) return false;
+
+      const returnedTokens = new Set(rows.map((row) => row.accountToken).filter(Boolean));
+      if (returnedTokens.size === 0) return false;
+
+      return Array.from(requestedTokens).every((token) => returnedTokens.has(token));
     },
 
     async refreshSequentially() {
@@ -910,11 +917,6 @@
         state.panelOpen = false;
         Dashboard.render();
       });
-      panel.querySelector('[data-act-show-all]')?.addEventListener('change', (event) => {
-        state.showAll = Boolean(event.currentTarget.checked);
-        Storage.write(STORAGE_KEYS.showAll, state.showAll);
-        Dashboard.render();
-      });
       panel.querySelector('[data-act-hide-achieved]')?.addEventListener('change', (event) => {
         state.hideAchieved = Boolean(event.currentTarget.checked);
         Storage.write(STORAGE_KEYS.hideAchieved, state.hideAchieved);
@@ -951,10 +953,6 @@
           <label class="act-label" for="act-keywords">Benefit keywords</label>
           <textarea id="act-keywords" class="act-keywords" spellcheck="false">${Text.escapeHtml(state.keywords.join(', '))}</textarea>
           <label class="act-toggle">
-            <input type="checkbox" data-act-show-all ${state.showAll ? 'checked' : ''}>
-            Show all returned trackers
-          </label>
-          <label class="act-toggle">
             <input type="checkbox" data-act-hide-achieved ${state.hideAchieved ? 'checked' : ''}>
             Hide achieved
           </label>
@@ -968,7 +966,7 @@
       }
 
       if (filteredTrackers.length === 0) {
-        return '<p class="act-empty">No trackers match the current keywords. Enable Show all returned trackers or edit the keyword list.</p>';
+        return '<p class="act-empty">No trackers match the current keywords. Clear the keyword list to show every returned tracker.</p>';
       }
 
       return Array.from(grouped.entries())
@@ -1050,8 +1048,6 @@
       const trackersForTrackedCards = state.hideAchieved
         ? currentAccountTrackers.filter((tracker) => !Format.isAchievedStatus(tracker.status))
         : currentAccountTrackers;
-
-      if (state.showAll) return trackersForTrackedCards;
 
       const keywords = Text.normalizedKeywords(state.keywords);
       if (keywords.length === 0) return trackersForTrackedCards;
@@ -1197,7 +1193,6 @@
         trackers: state.trackers.map(Diagnostics.sanitizeTracker),
         lastUpdated: state.lastUpdated,
         keywords: state.keywords,
-        showAll: state.showAll,
         hideAchieved: state.hideAchieved,
         status: state.status,
         error: state.error,
