@@ -888,6 +888,7 @@
       if (!state.panelOpen) return;
 
       const filteredTrackers = Dashboard.filteredTrackersForDisplay();
+      const usedCreditSummary = Dashboard.usedCreditSummary();
       const grouped = Dashboard.groupTrackersByBenefit(filteredTrackers);
 
       panel.innerHTML = `
@@ -903,7 +904,7 @@
           ${state.error ? `<p class="act-error">${Text.escapeHtml(state.error)}</p>` : ''}
           ${state.memberError ? `<p class="act-warning">${Text.escapeHtml(state.memberError)}</p>` : ''}
           ${state.skippedAccounts.length > 0 ? `<p class="act-warning">Skipped inaccessible cards: ${Text.escapeHtml(state.skippedAccounts.map((item) => item.account).join(', '))}</p>` : ''}
-          ${Dashboard.renderSettings()}
+          ${Dashboard.renderSettings(usedCreditSummary)}
           ${Dashboard.renderBenefitGroups(grouped, filteredTrackers)}
         </div>
       `;
@@ -947,7 +948,7 @@
       `;
     },
 
-    renderSettings() {
+    renderSettings(usedCreditSummary) {
       return `
         <div class="act-settings">
           <label class="act-label" for="act-keywords">Benefit keywords</label>
@@ -956,6 +957,26 @@
             <input type="checkbox" data-act-hide-achieved ${state.hideAchieved ? 'checked' : ''}>
             Hide achieved
           </label>
+          <div class="act-total-used">
+            <span>Total used credit</span>
+            <strong>${Text.escapeHtml(Format.money(usedCreditSummary.total, '$'))}</strong>
+          </div>
+          ${Dashboard.renderUsedCreditPeriods(usedCreditSummary.periods)}
+        </div>
+      `;
+    },
+
+    renderUsedCreditPeriods(periods) {
+      if (periods.length === 0) return '';
+
+      return `
+        <div class="act-period-sums" aria-label="Used credit by period">
+          ${periods.map((period) => `
+            <div class="act-period-sum">
+              <span>${Text.escapeHtml(period.label)}</span>
+              <strong>${Text.escapeHtml(Format.money(period.total, '$'))}</strong>
+            </div>
+          `).join('')}
         </div>
       `;
     },
@@ -1044,11 +1065,16 @@
     },
 
     filteredTrackersForDisplay() {
-      const currentAccountTrackers = Dashboard.trackersForCurrentAccounts();
+      const currentAccountTrackers = Dashboard.keywordFilteredTrackers();
       const trackersForTrackedCards = state.hideAchieved
         ? currentAccountTrackers.filter((tracker) => !Format.isAchievedStatus(tracker.status))
         : currentAccountTrackers;
 
+      return trackersForTrackedCards;
+    },
+
+    keywordFilteredTrackers() {
+      const trackersForTrackedCards = Dashboard.trackersForCurrentAccounts();
       const keywords = Text.normalizedKeywords(state.keywords);
       if (keywords.length === 0) return trackersForTrackedCards;
 
@@ -1056,6 +1082,34 @@
         const haystack = `${tracker.benefitName || ''} ${tracker.progressTitle || ''}`.toLowerCase();
         return keywords.some((keyword) => haystack.includes(keyword));
       });
+    },
+
+    usedCreditSummary() {
+      const summary = {
+        total: 0,
+        periods: new Map(),
+      };
+
+      Dashboard.keywordFilteredTrackers().forEach((tracker) => {
+        const spentAmount = Format.numericAmount(tracker.spentAmount);
+        if (spentAmount == null) return;
+
+        const period = Format.trackerPeriod(tracker);
+        const current = summary.periods.get(period.key) || {
+          ...period,
+          total: 0,
+        };
+
+        summary.total += spentAmount;
+        current.total += spentAmount;
+        summary.periods.set(period.key, current);
+      });
+
+      return {
+        total: summary.total,
+        periods: Array.from(summary.periods.values())
+          .sort((left, right) => left.sortValue - right.sortValue || left.label.localeCompare(right.label)),
+      };
     },
 
     trackersForCurrentAccounts() {
@@ -1105,6 +1159,83 @@
         text: `Ends ${endDates.join(' / ')}`,
         isSoon: endDates.some((endDate) => Format.isDateLessThanDaysAway(endDate, 15)),
       };
+    },
+
+    trackerPeriod(tracker) {
+      const durationLabel = Format.periodDurationLabel(tracker.trackerDuration);
+      if (durationLabel) {
+        return {
+          key: `duration:${durationLabel.toLowerCase()}`,
+          label: durationLabel,
+          sortValue: Format.periodSortValue(durationLabel),
+        };
+      }
+
+      const inferredLabel = Format.inferPeriodLabel(tracker.periodStartDate, tracker.periodEndDate);
+      if (inferredLabel) {
+        return {
+          key: `inferred:${inferredLabel.toLowerCase()}`,
+          label: inferredLabel,
+          sortValue: Format.periodSortValue(inferredLabel),
+        };
+      }
+
+      const endDate = tracker.periodEndDate || 'unknown';
+      return {
+        key: `end:${endDate}`,
+        label: tracker.periodEndDate ? `Ends ${tracker.periodEndDate}` : 'Unknown period',
+        sortValue: 10000 + Format.dateSortValue(tracker.periodEndDate),
+      };
+    },
+
+    periodDurationLabel(value) {
+      const raw = String(value || '').trim();
+      if (!raw) return '';
+
+      const words = raw
+        .replace(/([a-z])([A-Z])/g, '$1 $2')
+        .replace(/[_-]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const normalized = words.toLowerCase();
+
+      if (normalized.includes('half') && normalized.includes('year')) return 'Half year';
+      if (normalized.includes('semi') && normalized.includes('annual')) return 'Half year';
+      if (normalized.includes('quarter')) return 'Quarter';
+      if (normalized.includes('month')) return 'Month';
+      if (normalized.includes('annual') || normalized.includes('year')) return 'Year';
+      if (normalized.includes('week')) return 'Week';
+
+      return '';
+    },
+
+    inferPeriodLabel(startValue, endValue) {
+      const startDate = Format.parseDateOnly(startValue);
+      const endDate = Format.parseDateOnly(endValue);
+      if (!startDate || !endDate || endDate < startDate) return '';
+
+      const dayCount = Math.round((endDate.getTime() - startDate.getTime()) / 86400000) + 1;
+      if (dayCount <= 10) return 'Week';
+      if (dayCount <= 45) return 'Month';
+      if (dayCount <= 120) return 'Quarter';
+      if (dayCount <= 220) return 'Half year';
+      if (dayCount <= 400) return 'Year';
+      return `${startValue} to ${endValue}`;
+    },
+
+    periodSortValue(label) {
+      const normalized = String(label || '').toLowerCase();
+      if (normalized === 'week') return 7;
+      if (normalized === 'month') return 31;
+      if (normalized === 'quarter') return 92;
+      if (normalized === 'half year') return 183;
+      if (normalized === 'year') return 366;
+      return 1000;
+    },
+
+    dateSortValue(value) {
+      const date = Format.parseDateOnly(value);
+      return date ? date.getTime() / 86400000 : 0;
     },
 
     isDateLessThanDaysAway(value, days) {
@@ -1411,6 +1542,46 @@
           color: #334e68;
           font-size: 12px;
           user-select: none;
+        }
+
+        .act-total-used {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          padding-top: 4px;
+          color: #334e68;
+          font-size: 12px;
+        }
+
+        .act-total-used strong {
+          color: #102a43;
+          font-size: 14px;
+          font-weight: 800;
+        }
+
+        .act-period-sums {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+        }
+
+        .act-period-sum {
+          display: inline-flex;
+          align-items: baseline;
+          gap: 6px;
+          padding: 4px 7px;
+          border: 1px solid #d9e8f8;
+          border-radius: 6px;
+          background: #fff;
+          color: #627d98;
+          font-size: 11px;
+        }
+
+        .act-period-sum strong {
+          color: #102a43;
+          font-size: 12px;
+          font-weight: 800;
         }
 
         .act-credit-group {
